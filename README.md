@@ -431,3 +431,56 @@ Following:
 * http://tldp.org/HOWTO/Program-Library-HOWTO/shared-libraries.html
 * http://wiki.osdev.org/Going_Further_on_x86
 * http://wiki.osdev.org/Meaty_Skeleton
+* http://alex.dzyoba.com/programming/multiboot.html
+* https://0x00sec.org/t/realmode-assembly-writing-bootable-stuff-part-3/3116
+
+---
+
+Unary `~` inverts all the bits.
+
+But Unary `-` is just integer arithmetic that causes underflow if necessary. Because numbers in assembly have no types, they are always assumed to be unsigned integers.
+
+What is the size of the numbers/constants? It depends on what is being set and the targetted object format.
+
+In the case of `.set MAGIC, 0x1BADB002`, this is 4 bytes and so it is 32 bit and we're also targetting elf32. Then when performing arithmetic on it, the smaller operand types get upcasted to the larger type.
+
+The end result is that `MAGIC`, `FLAGS` and `CHECKSUM` gets set in the `.multiboot` section and will get added up and the bootloader checks if these 3 32 bit numbers add up to 0. If it adds up to 0, then the file is correct.
+
+The checksum here is not really used for maintaining integrity of the executable, so it's a bit strange to call it the checksum.
+
+The align instruction is important in case your target system has a different word size. So by using `.align 4`, you make sure that all subsequent data definitions in the section is aligned to 4 bytes. If you didn't have `.align 4`, on a 64 bit machine, after `.long MAGIC`, there would be a 4 byte gap until `.long FLAGS`. Also `.long` is equivalent to a dword.
+
+The https://os.phil-opp.com/multiboot-kernel/ doesn't use the `.align 4` or any kind of alignment command, instead the tutorial usese the `-n | --nmagic` flag that turns off page alignment within a section. This appears to turn the assembly into WYSIWYG. Also that tutorial is targetting elf64 multiboot standard 2 which means a couple things will be different.
+
+The section names is kind of arbitrary, they depend on the situation you're going to target and you can write loader scripts that handle arbitrary sections, but there are standard section names.
+
+The specified stack space in the `.bss` section is only specifying the stack space for the kernel itself, this does not limit how much stack space can be given to userspace processes.
+
+Within the multiboot standard, the bootloader starts off in real mode, and is limited to 1 MiB of memory, it switches to protected 32 bit mode before executing the kernel code. So by the time we're in our kernel code, we are already in protected 32 bit mode. Note that in real mode the system is limited to 1 MiB of addressable memory and unlimited direct software access to all addressable memory. Real mode offers no support for memory protection or multitasking or code privilege levels. This explains why the linker script says to make our code start loading at 1MiB physical address. This would be where the entire kernel executable gets loaded into and the bootloader reads from and subsequently jumps to when it intends to execute the kernel. What's under the 1MiB mark? There are things like the VGA screen, the BIOS, ACPI... etc. Apparently it's a good idea to not touch anything below the reserved 1MiB mark unless you know exactly what you're addressing. You don't want overwrite useful stuff below the 1MiB mark! Here's some more useful information about this: http://forum.osdev.org/viewtopic.php?t=11391
+
+What are all these modes? Historically modes are intended for modal operations of the CPU, different modes offer different privileges to the executing code. That way a user space program wouldn't compromise the kernel's memory... etc. However the modes on intel CPUs from Real mode to Protected mode to Virtual mode to Long mode... etc, were introduced primarily for backwards compatibility reasons, so that way new kernels can make use of the latest features by switching to the latest modes, while older kernels can still run on the latest CPUs by staying in their desired modes. So we have all this complicated mode switching code that makes use of strange registers and other techniques to switch. This backwards compatibility capability wasn't just used by older kernels running on new CPUs, but also old user space programs written for the old kernels.
+
+The mode that latest OS kernels switch to is straight to long mode, but right now we're just staying in protected mode. And we're booting with qemu-system-i386, which is not emulating a 64 bit system but a 32 bit system. This means our OS kernel atm would stay in protected mode and would not switch from it any time soon, unless we rewrite our target to be 64 bit to elf64 and friends, then we would change our assembly to switch to long mode before handing off to C or Rust or other systems languages.
+
+On the topic of 32 bit architectures. This is generally called `IA-32` or more commonly `i386`. This name comes from the first intel CPU to support 32 bit operation (and consequently introducing "protected mode") the intel 80386 in 1985. Since the 2000s, all major manufacturers moved to 64 bit variants. The names `i386` and `i686` generally refer to the same thing when used in programming tools, all refer to some intel 32 bit architecture. That's why our target is `i686` when compiling the toolchain, but our qemu tool has a `i386` suffix.
+
+---
+
+It is possible to use qemu in 2 ways: full system emulation and user mode emulation. Using the command `qemu-system-i386` does a full system emulation emulating an i386 architecture along with periperhals... etc. Whereas using just `qemu-i386` allows you do to user mode emulation which allows one to run processes compiled for linux on a i386 processor on your current linux. So if someone gives you a binary executable that was compiled for 32 bit linux, and you're on 64 bit linux, you can run the 32 bit application using `qemu-i386`. Note that of course you can run 32 bit linux executables on a 64 bit computer if you have the right glibc and loader as well, but this extends to other architectures like `qemu-arm` and `qemu-aarch64`. However it is best to run these on statically linked executables, otherwise dynamically linked executables will be looking for libraries that may not exist on your system or at the same place. At any case this is a nice way to doing cross platform development, if you have a cross compiler targetting an alternative platform (but still the Linux OS), you can use this as a way of emulating the program. In this method, using qemu is better than using VirtualBox on Windows. But you can also use qemu on windows. Then it is also easy to test isos.
+
+Running cdroms: `qemu-system-* -cdrom *.iso`. Running multiboot kernels: `qemu-system-* -kernel *.bin`.
+
+If no emulation is required and only isolation, you use a container, but just like VM hypervisors, there are many container platforms, like docker, lxc, using libvirt, systemd containers, nix containers... You can use the cgroups API directly by calling into it, you need to write C code for this or write an FFI from a high level language. LXC already does this and provides a bunch of user space tools that interact with these features.
+
+We may want to explore further virtualisation capabilities provided by NixOS: https://nixos.org/nixos/options.html#virtualisation
+
+In terms of using qemu instead of the widely understood virtualbox:
+
+```
+qemu-img create ubuntu.img 10G
+qemu-system-i386 -hda ubuntu.img -boot d -cdrom ./ubuntu.iso -m 512
+```
+
+So it's very command line based instead of GUI based.
+
+Stack growth doesn't usually depend on the OS itself, but on the processor. On x86 the stack grows down while the heap is dependent on the OS, in the case of Linux, it grows up to meet the stack. Henc stack is allocated very early in the address space, while the heap is allocated closer to the end of the address space.
